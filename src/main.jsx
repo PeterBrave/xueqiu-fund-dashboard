@@ -291,6 +291,10 @@ function sendMessage(message) {
       resolve({ ok: true, tradeRecordsByAccount: DEMO_TRADES });
       return;
     }
+    if (message?.type === "refresh-trade-records") {
+      resolve({ ok: true, tradeRecordsByAccount: DEMO_TRADES, count: DEMO_TRADES["demo-main"].records.length });
+      return;
+    }
     if (message?.type === "get-fund-valuations" || message?.type === "fetch-fund-valuations") {
       resolve({ ok: true, fundValuationsByCode: DEMO_FUND_VALUATIONS, failed: 0 });
       return;
@@ -692,6 +696,7 @@ function FundDashboard() {
   const [jsonText, setJsonText] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tradeRecordsByAccount, setTradeRecordsByAccount] = useState({});
+  const [tradeRefreshing, setTradeRefreshing] = useState(false);
   const [fundValuationsByCode, setFundValuationsByCode] = useState({});
   const [strategySettings, setStrategySettings] = useState(DEFAULT_STRATEGY_SETTINGS);
   const [qwenApiKey, setQwenApiKey] = useState("");
@@ -763,6 +768,25 @@ function FundDashboard() {
       setTradeRecordsByAccount(result.tradeRecordsByAccount || {});
     }
   }, []);
+
+  const refreshTradeRecords = useCallback(async () => {
+    setTradeRefreshing(true);
+    try {
+      const result = await sendMessage({ type: "refresh-trade-records" });
+      if (result?.ok) {
+        if (result.tradeRecordsByAccount) {
+          setTradeRecordsByAccount(result.tradeRecordsByAccount);
+        } else {
+          await loadTradeRecords();
+        }
+        message.success(`交易记录已刷新，共 ${result.count || 0} 条。`);
+      } else {
+        message.warning(result?.error || "交易记录刷新失败。");
+      }
+    } finally {
+      setTradeRefreshing(false);
+    }
+  }, [loadTradeRecords, message]);
 
   const loadFundValuations = useCallback(
     async (codes = []) => {
@@ -1711,7 +1735,19 @@ function FundDashboard() {
                 : "暂无交易记录，打开交易记录页后会自动读取"}
             </Text>
           </div>
-          {aiAdviceLoading ? <Tag color="processing">生成报告中</Tag> : null}
+          <Space size={4}>
+            {aiAdviceLoading ? <Tag color="processing">生成报告中</Tag> : null}
+            <Tooltip title="让插件在后台自动打开一次蛋卷交易记录页并抓取，无需手动切过去">
+              <Button
+                size="small"
+                type="text"
+                icon={<ReloadOutlined />}
+                loading={tradeRefreshing}
+                aria-label="刷新交易记录"
+                onClick={refreshTradeRecords}
+              />
+            </Tooltip>
+          </Space>
         </div>
         <div className="today-action-list">
           {todayTradeRecords.length ? (
@@ -2022,9 +2058,9 @@ function FundDashboard() {
             <span>实时估值缓存</span>
             <strong>{valuationCoveredAmount ? `${percent1(valuationCoverageRatio)} 覆盖` : "未覆盖"}</strong>
           </button>
-          <button type="button" className="setting-row" onClick={loadTradeRecords}>
-            <span>交易记录缓存</span>
-            <strong>{visibleTradeRecords.length} 条</strong>
+          <button type="button" className="setting-row" onClick={refreshTradeRecords} disabled={tradeRefreshing}>
+            <span>刷新交易记录</span>
+            <strong>{tradeRefreshing ? "刷新中..." : `${visibleTradeRecords.length} 条`}</strong>
           </button>
 
           {visibleTradeRecords.length ? (

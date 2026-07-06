@@ -39,6 +39,80 @@ async function rememberAccount(account) {
   await chrome.storage.local.set({ lastAccount: account });
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendMessageToTab(tabId, message) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch {
+    return null;
+  }
+}
+
+function waitForTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const check = () => {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) return resolve(false);
+        if (tab.status === "complete" || Date.now() - start > timeoutMs) return resolve(true);
+        setTimeout(check, 400);
+      });
+    };
+    check();
+  });
+}
+
+// 在后台标签页打开交易记录页，等内容脚本抓取完再关闭
+async function scrapeTradeUrl(url, { pollMs = 1000, timeoutMs = 16000 } = {}) {
+  const tab = await chrome.tabs.create({ url, active: false });
+  try {
+    await waitForTabComplete(tab.id);
+    const deadline = Date.now() + timeoutMs;
+    let count = 0;
+    while (Date.now() < deadline) {
+      const result = await sendMessageToTab(tab.id, { type: "scrape-trade-records" });
+      if (result?.count) {
+        count = result.count;
+        break;
+      }
+      await delay(pollMs);
+    }
+    return count;
+  } finally {
+    try {
+      await chrome.tabs.remove(tab.id);
+    } catch {
+      /* tab 可能已被手动关闭 */
+    }
+  }
+}
+
+async function refreshTradeRecords() {
+  const { tradeRecordsByAccount = {} } = await chrome.storage.local.get("tradeRecordsByAccount");
+  const urls = [
+    ...new Set(
+      Object.values(tradeRecordsByAccount)
+        .map((entry) => entry?.sourceUrl)
+        .filter((url) => typeof url === "string" && url.includes("trade-record"))
+    )
+  ];
+  if (!urls.length) {
+    return {
+      ok: false,
+      error: "还没有交易记录来源页。请先在蛋卷里打开一次「交易记录」页面，之后就能从看板直接刷新了。"
+    };
+  }
+  let total = 0;
+  for (const url of urls) {
+    total += await scrapeTradeUrl(url);
+  }
+  const { tradeRecordsByAccount: latest = {} } = await chrome.storage.local.get("tradeRecordsByAccount");
+  return { ok: true, count: total, tradeRecordsByAccount: latest };
+}
+
 async function openDashboard(account) {
   if (account?.accountId) await rememberAccount(account);
   const query = account?.accountId ? `?accountid=${encodeURIComponent(account.accountId)}` : "";
@@ -96,6 +170,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "get-trade-records") {
       const { tradeRecordsByAccount = {} } = await chrome.storage.local.get("tradeRecordsByAccount");
       sendResponse({ ok: true, tradeRecordsByAccount });
+      return;
+    }
+
+    if (message?.type === "refresh-trade-records") {
+      const result = await refreshTradeRecords();
+      sendResponse(result);
       return;
     }
 
