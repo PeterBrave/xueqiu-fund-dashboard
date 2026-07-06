@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "雪球基金聚合看板",
+  "description": "把蛋卷/雪球基金持仓按自定义分组合并查看。",
+  "version": "0.2.1",
+  "permissions": ["activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "https://danjuanfunds.com/*",
+    "https://fundgz.1234567.com.cn/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {
+    "default_title": "打开基金聚合看板"
+  },
+  "background": {
+    "service_worker": "dist/src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://danjuanfunds.com/rn/fund-assets*",
+        "https://danjuanfunds.com/my-money*",
+        "https://danjuanfunds.com/*trade-record*"
+      ],
+      "js": ["dist/src/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
