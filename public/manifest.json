@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "雪球基金聚合看板",
   "description": "把蛋卷/雪球基金持仓按自定义分组合并查看。",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "permissions": ["activeTab", "storage", "tabs"],
   "host_permissions": [
     "https://danjuanfunds.com/*",

@@ -710,6 +710,7 @@ function FundDashboard() {
   const [allocationHistory, setAllocationHistory] = useState([]);
   const [form] = Form.useForm();
   const chatBodyRef = useRef(null);
+  const valuationAttemptAtRef = useRef({});
   const aiEnabled = Boolean(qwenApiKey.trim());
 
   const funds = payload?.data?.items || [];
@@ -787,18 +788,24 @@ function FundDashboard() {
   );
 
   const loadFundValuations = useCallback(
-    async (codes = []) => {
+    async (codes = [], { silent = false } = {}) => {
       const uniqueCodes = [...new Set(codes.filter(Boolean))];
       const messageType = uniqueCodes.length ? "fetch-fund-valuations" : "get-fund-valuations";
       const result = await sendMessage({ type: messageType, codes: uniqueCodes });
       if (result?.ok) {
         setFundValuationsByCode(result.fundValuationsByCode || {});
         await storage.set({ fundValuationsByCode: result.fundValuationsByCode || {} });
-        if (result.requested && result.failed >= result.requested) {
-          message.warning(result.errors?.[0] || "实时估值接口暂时没有返回可用数据。");
+        if (!silent && result.requested && result.failed >= result.requested) {
+          // key 去重：同类警告只保留一个弹窗，不会刷屏
+          message.warning({
+            key: "valuation-warning",
+            content: result.rateLimited
+              ? "实时估值接口被限流，已暂停请求，几分钟后会自动重试。"
+              : result.errors?.[0] || "实时估值接口暂时没有返回可用数据。"
+          });
         }
-      } else if (result?.error) {
-        message.warning(result.error);
+      } else if (!silent && result?.error) {
+        message.warning({ key: "valuation-warning", content: result.error });
       }
     },
     [message, storage]
@@ -929,11 +936,22 @@ function FundDashboard() {
 
   useEffect(() => {
     if (!funds.length) return;
-    const staleBefore = Date.now() - 5 * 60 * 1000;
+    const now = Date.now();
+    const staleBefore = now - 5 * 60 * 1000;
+    const attemptedAt = valuationAttemptAtRef.current;
     const staleCodes = [...new Set(funds.map((fund) => fund.fd_code).filter(Boolean))]
-      .filter((code) => !fundValuationsByCode[code] || num(fundValuationsByCode[code]?.fetchedAt) < staleBefore)
+      .filter((code) => {
+        const entry = fundValuationsByCode[code];
+        // 成功和失败都算“碰过”，失败进入同样的冷却期，避免接口限流时无限重试
+        const lastTouch = Math.max(num(entry?.fetchedAt), num(entry?.failedAt), num(attemptedAt[code]));
+        return !lastTouch || lastTouch < staleBefore;
+      })
       .slice(0, 40);
-    if (staleCodes.length) loadFundValuations(staleCodes);
+    if (!staleCodes.length) return;
+    staleCodes.forEach((code) => {
+      attemptedAt[code] = now;
+    });
+    loadFundValuations(staleCodes, { silent: true });
   }, [funds, fundValuationsByCode, loadFundValuations]);
 
   useEffect(() => {

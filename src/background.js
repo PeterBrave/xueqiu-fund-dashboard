@@ -236,31 +236,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { fundValuationsByCode = {} } = await chrome.storage.local.get("fundValuationsByCode");
       const nextValuations = { ...fundValuationsByCode };
       const valuationErrors = [];
-      const results = await Promise.allSettled(
-        codes.map(async (code) => {
-          try {
-            const response = await fetch(`${FUND_VALUATION_URL}${encodeURIComponent(code)}.js?rt=${Date.now()}`, {
-              credentials: "omit",
-              headers: {
-                accept: "*/*"
-              }
-            });
-            if (!response.ok) throw new Error(`${code} 估值接口返回 ${response.status}`);
-            const text = await response.text();
-            const payload = parseJsonp(text, "jsonpgz");
-            nextValuations[code] = {
-              code,
-              payload,
-              fetchedAt: Date.now()
-            };
-          } catch (error) {
-            valuationErrors.push(`${code}: ${error.message || String(error)}`);
-            throw error;
+      let succeeded = 0;
+      let failed = 0;
+      let rateLimited = false;
+
+      const markFailed = (code) => {
+        failed += 1;
+        // 记录失败时间，前端据此冷却，避免限流时无限重试
+        nextValuations[code] = { ...(nextValuations[code] || { code }), failedAt: Date.now() };
+      };
+
+      const fetchOne = async (code) => {
+        const response = await fetch(`${FUND_VALUATION_URL}${encodeURIComponent(code)}.js?rt=${Date.now()}`, {
+          credentials: "omit",
+          headers: { accept: "*/*" }
+        });
+        if (!response.ok) {
+          const error = new Error(`${code} 估值接口返回 ${response.status}`);
+          error.rateLimited = response.status === 514 || response.status === 403 || response.status === 429;
+          throw error;
+        }
+        const payload = parseJsonp(await response.text(), "jsonpgz");
+        nextValuations[code] = { code, payload, fetchedAt: Date.now() };
+      };
+
+      // 小批量串行请求，天天基金接口盘中限流（514），并发太高会被封
+      const BATCH_SIZE = 6;
+      for (let index = 0; index < codes.length; index += BATCH_SIZE) {
+        if (rateLimited) {
+          // 已判定被限流：剩余的不再请求，直接标记失败进入冷却
+          codes.slice(index).forEach(markFailed);
+          break;
+        }
+        const batch = codes.slice(index, index + BATCH_SIZE);
+        const settled = await Promise.allSettled(batch.map(fetchOne));
+        settled.forEach((item, offset) => {
+          if (item.status === "fulfilled") {
+            succeeded += 1;
+            return;
           }
-        })
-      );
-      const failed = results.filter((item) => item.status === "rejected").length;
-      const succeeded = results.length - failed;
+          markFailed(batch[offset]);
+          valuationErrors.push(item.reason?.message || String(item.reason));
+          if (item.reason?.rateLimited) rateLimited = true;
+        });
+        if (index + BATCH_SIZE < codes.length && !rateLimited) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+
       await chrome.storage.local.set({ fundValuationsByCode: nextValuations });
       sendResponse({
         ok: true,
@@ -268,6 +291,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         requested: codes.length,
         succeeded,
         failed,
+        rateLimited,
         errors: valuationErrors.slice(0, 5)
       });
       return;
