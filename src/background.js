@@ -5,6 +5,67 @@ const OVERVIEW_GAIN_URL =
 const OVERVIEW_ICON_URL = "https://danjuanfunds.com/djapi/fundx/profit/assets/queryIcon/djhome";
 const FUND_DETAIL_URL = "https://danjuanfunds.com/djapi/fund/detail/";
 const FUND_VALUATION_URL = "https://fundgz.1234567.com.cn/js/";
+const TRADE_RECORD_URL = "https://danjuanfunds.com/rn/trade-record";
+
+/* ---- 自动刷新交易记录：后台开一个交易记录页标签，等内容脚本抓取后自动关闭 ---- */
+
+const pendingTradeCaptureTabs = new Map();
+let tradeRefreshPromise = null;
+
+function waitForTradeCapture(tabId, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingTradeCaptureTabs.delete(tabId);
+      resolve(false);
+    }, timeoutMs);
+    pendingTradeCaptureTabs.set(tabId, () => {
+      clearTimeout(timer);
+      pendingTradeCaptureTabs.delete(tabId);
+      resolve(true);
+    });
+  });
+}
+
+async function refreshTradeRecordsFromPage(url) {
+  const tab = await chrome.tabs.create({ url, active: false });
+  try {
+    const captured = await waitForTradeCapture(tab.id);
+    // 首次解析成功后页面可能还在补渲染，稍等一下再关闭，让内容脚本捕获完整列表
+    if (captured) await new Promise((resolve) => setTimeout(resolve, 2500));
+    return captured;
+  } finally {
+    try {
+      await chrome.tabs.remove(tab.id);
+    } catch {
+      // 标签可能已被用户关闭
+    }
+  }
+}
+
+function startTradeRefresh() {
+  if (tradeRefreshPromise) return tradeRefreshPromise;
+  tradeRefreshPromise = (async () => {
+    const { tradeRecordsByAccount = {} } = await chrome.storage.local.get("tradeRecordsByAccount");
+    // 优先复用用户真实访问过的交易记录页地址（可能带账户参数）
+    const urls = [
+      ...new Set(
+        Object.values(tradeRecordsByAccount)
+          .sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0))
+          .map((entry) => entry.sourceUrl)
+          .filter((url) => url && url.includes("trade-record"))
+      )
+    ].slice(0, 2);
+    if (!urls.length) urls.push(TRADE_RECORD_URL);
+    let captured = false;
+    for (const url of urls) {
+      captured = (await refreshTradeRecordsFromPage(url)) || captured;
+    }
+    return captured;
+  })().finally(() => {
+    tradeRefreshPromise = null;
+  });
+  return tradeRefreshPromise;
+}
 
 function parseJsonp(text, callbackName) {
   const trimmed = String(text || "").trim();
@@ -37,80 +98,6 @@ function parseAccountFromUrl(url) {
 async function rememberAccount(account) {
   if (!account?.accountId) return;
   await chrome.storage.local.set({ lastAccount: account });
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function sendMessageToTab(tabId, message) {
-  try {
-    return await chrome.tabs.sendMessage(tabId, message);
-  } catch {
-    return null;
-  }
-}
-
-function waitForTabComplete(tabId, timeoutMs = 15000) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const check = () => {
-      chrome.tabs.get(tabId, (tab) => {
-        if (chrome.runtime.lastError || !tab) return resolve(false);
-        if (tab.status === "complete" || Date.now() - start > timeoutMs) return resolve(true);
-        setTimeout(check, 400);
-      });
-    };
-    check();
-  });
-}
-
-// 在后台标签页打开交易记录页，等内容脚本抓取完再关闭
-async function scrapeTradeUrl(url, { pollMs = 1000, timeoutMs = 16000 } = {}) {
-  const tab = await chrome.tabs.create({ url, active: false });
-  try {
-    await waitForTabComplete(tab.id);
-    const deadline = Date.now() + timeoutMs;
-    let count = 0;
-    while (Date.now() < deadline) {
-      const result = await sendMessageToTab(tab.id, { type: "scrape-trade-records" });
-      if (result?.count) {
-        count = result.count;
-        break;
-      }
-      await delay(pollMs);
-    }
-    return count;
-  } finally {
-    try {
-      await chrome.tabs.remove(tab.id);
-    } catch {
-      /* tab 可能已被手动关闭 */
-    }
-  }
-}
-
-async function refreshTradeRecords() {
-  const { tradeRecordsByAccount = {} } = await chrome.storage.local.get("tradeRecordsByAccount");
-  const urls = [
-    ...new Set(
-      Object.values(tradeRecordsByAccount)
-        .map((entry) => entry?.sourceUrl)
-        .filter((url) => typeof url === "string" && url.includes("trade-record"))
-    )
-  ];
-  if (!urls.length) {
-    return {
-      ok: false,
-      error: "还没有交易记录来源页。请先在蛋卷里打开一次「交易记录」页面，之后就能从看板直接刷新了。"
-    };
-  }
-  let total = 0;
-  for (const url of urls) {
-    total += await scrapeTradeUrl(url);
-  }
-  const { tradeRecordsByAccount: latest = {} } = await chrome.storage.local.get("tradeRecordsByAccount");
-  return { ok: true, count: total, tradeRecordsByAccount: latest };
 }
 
 async function openDashboard(account) {
@@ -163,6 +150,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         }
       });
+      const notifyCapture = pendingTradeCaptureTabs.get(sender?.tab?.id);
+      if (notifyCapture) notifyCapture();
       sendResponse({ ok: true, count: records.length });
       return;
     }
@@ -174,8 +163,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message?.type === "refresh-trade-records") {
-      const result = await refreshTradeRecords();
-      sendResponse(result);
+      const captured = await startTradeRefresh();
+      const { tradeRecordsByAccount = {} } = await chrome.storage.local.get("tradeRecordsByAccount");
+      sendResponse({
+        ok: true,
+        captured,
+        tradeRecordsByAccount,
+        error: captured ? "" : "未能自动读取交易记录，请确认已登录雪球/蛋卷基金"
+      });
       return;
     }
 

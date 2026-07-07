@@ -287,12 +287,8 @@ function sendMessage(message) {
       resolve({ ok: true, account: { accountId: ALL_ACCOUNTS_ID, accountName: "全部基金账户" } });
       return;
     }
-    if (message?.type === "get-trade-records") {
-      resolve({ ok: true, tradeRecordsByAccount: DEMO_TRADES });
-      return;
-    }
-    if (message?.type === "refresh-trade-records") {
-      resolve({ ok: true, tradeRecordsByAccount: DEMO_TRADES, count: DEMO_TRADES["demo-main"].records.length });
+    if (message?.type === "get-trade-records" || message?.type === "refresh-trade-records") {
+      resolve({ ok: true, captured: true, tradeRecordsByAccount: DEMO_TRADES });
       return;
     }
     if (message?.type === "get-fund-valuations" || message?.type === "fetch-fund-valuations") {
@@ -769,24 +765,26 @@ function FundDashboard() {
     }
   }, []);
 
-  const refreshTradeRecords = useCallback(async () => {
-    setTradeRefreshing(true);
-    try {
-      const result = await sendMessage({ type: "refresh-trade-records" });
-      if (result?.ok) {
-        if (result.tradeRecordsByAccount) {
-          setTradeRecordsByAccount(result.tradeRecordsByAccount);
-        } else {
-          await loadTradeRecords();
+  const refreshTradeRecords = useCallback(
+    async ({ silent = false } = {}) => {
+      setTradeRefreshing(true);
+      try {
+        const result = await sendMessage({ type: "refresh-trade-records" });
+        if (result?.ok) {
+          setTradeRecordsByAccount(result.tradeRecordsByAccount || {});
+          if (!silent) {
+            if (result.captured) message.success("交易记录已刷新。");
+            else message.warning(result.error || "未能自动读取交易记录。");
+          }
+        } else if (!silent && result?.error) {
+          message.warning(result.error);
         }
-        message.success(`交易记录已刷新，共 ${result.count || 0} 条。`);
-      } else {
-        message.warning(result?.error || "交易记录刷新失败。");
+      } finally {
+        setTradeRefreshing(false);
       }
-    } finally {
-      setTradeRefreshing(false);
-    }
-  }, [loadTradeRecords, message]);
+    },
+    [message]
+  );
 
   const loadFundValuations = useCallback(
     async (codes = []) => {
@@ -901,6 +899,8 @@ function FundDashboard() {
         setSourceStatus("显示上次缓存");
       }
       await loadTradeRecords();
+      // 打开看板时后台静默刷新一次交易记录，不用手动去访问交易记录页
+      if (HAS_EXTENSION_API) refreshTradeRecords({ silent: true });
 
       const lastAccount = accountResult?.account || null;
       const freshOverview = await fetchOverview();
@@ -1737,14 +1737,14 @@ function FundDashboard() {
           </div>
           <Space size={4}>
             {aiAdviceLoading ? <Tag color="processing">生成报告中</Tag> : null}
-            <Tooltip title="让插件在后台自动打开一次蛋卷交易记录页并抓取，无需手动切过去">
+            <Tooltip title="刷新交易记录">
               <Button
                 size="small"
                 type="text"
                 icon={<ReloadOutlined />}
-                loading={tradeRefreshing}
                 aria-label="刷新交易记录"
-                onClick={refreshTradeRecords}
+                loading={tradeRefreshing}
+                onClick={() => refreshTradeRecords()}
               />
             </Tooltip>
           </Space>
@@ -2058,9 +2058,9 @@ function FundDashboard() {
             <span>实时估值缓存</span>
             <strong>{valuationCoveredAmount ? `${percent1(valuationCoverageRatio)} 覆盖` : "未覆盖"}</strong>
           </button>
-          <button type="button" className="setting-row" onClick={refreshTradeRecords} disabled={tradeRefreshing}>
-            <span>刷新交易记录</span>
-            <strong>{tradeRefreshing ? "刷新中..." : `${visibleTradeRecords.length} 条`}</strong>
+          <button type="button" className="setting-row" onClick={() => refreshTradeRecords()}>
+            <span>{tradeRefreshing ? "正在刷新交易记录..." : "刷新交易记录"}</span>
+            <strong>{visibleTradeRecords.length} 条</strong>
           </button>
 
           {visibleTradeRecords.length ? (

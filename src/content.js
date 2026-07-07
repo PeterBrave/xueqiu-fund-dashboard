@@ -253,26 +253,6 @@ function injectDashboardButton(account) {
   document.documentElement.appendChild(button);
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === "scrape-trade-records") {
-    if (!window.location.href.includes("trade-record")) {
-      sendResponse({ ok: false, count: 0, url: window.location.href });
-      return true;
-    }
-    const records = parseTradeRecordsFromText(document.body.innerText || "");
-    if (records.length) {
-      chrome.runtime.sendMessage({
-        type: "save-trade-records",
-        accountId: currentAccount()?.accountId || "all",
-        records
-      });
-    }
-    sendResponse({ ok: true, count: records.length, url: window.location.href });
-    return true;
-  }
-  return false;
-});
-
 const account = currentAccount();
 if (account) {
   chrome.runtime.sendMessage({ type: "account-seen", account });
